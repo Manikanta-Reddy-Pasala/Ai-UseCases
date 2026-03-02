@@ -1,38 +1,70 @@
 # Use Case 3: AI-Powered DevOps
 
-## Overview
-Intelligent infrastructure management using AI for log analysis, anomaly detection, incident response, and predictive scaling.
+## Intelligent Log Analysis, Metrics Monitoring, and Auto-Remediation
+
+AI-powered DevOps platform that analyzes logs for anomalies, monitors system metrics, provides root cause analysis, and offers safe auto-remediation actions.
 
 ## Architecture
+
 ```
-Kubernetes Cluster → Metrics/Logs → AI Analysis Engine
-                                        ├── Anomaly Detection (pattern recognition)
-                                        ├── Root Cause Analysis (LLM reasoning)
-                                        ├── Auto-Remediation (safe action execution)
-                                        └── Predictive Scaling (forecast-based)
-                                             ↓
-                                    Alert → Dashboard → Action
+                         ┌─────────────────┐
+                         │  FastAPI Server  │
+                         │   Port 8002      │
+                         └────────┬────────┘
+                                  │
+              ┌───────────────────┼───────────────────┐
+              │                   │                   │
+    ┌─────────▼──────┐  ┌────────▼────────┐  ┌──────▼────────┐
+    │  Log Analyzer   │  │ Metric Analyzer │  │ Remediation   │
+    │ (Pattern+AI)    │  │   (psutil)      │  │  (Actions)    │
+    └────────┬───────┘  └────────┬────────┘  └──────┬────────┘
+             │                   │                   │
+    ┌────────▼───────┐  ┌────────▼────────┐  ┌──────▼────────┐
+    │ 10 Error       │  │ CPU/Mem/Disk    │  │ 7 Safe        │
+    │ Patterns       │  │ Load/Network    │  │ Actions       │
+    │ + Claude AI    │  │ Health Score    │  │ + Dry Run     │
+    └────────────────┘  └─────────────────┘  └───────────────┘
 ```
 
-## Key Components
-1. **Log Analyzer**: AI-powered log parsing and anomaly detection
-2. **Metric Monitor**: Time-series anomaly detection with ML models
-3. **Incident Responder**: LLM-based root cause analysis and fix suggestion
-4. **Auto-Scaler**: Predictive scaling based on traffic patterns
-5. **ChatOps Interface**: Natural language infrastructure queries
+## Key Features
 
-## Tech Stack
-- Python, FastAPI
-- Kubernetes API (python-kubernetes)
-- Prometheus/Grafana (metrics)
-- Claude API (reasoning)
-- scikit-learn (anomaly detection)
-- Redis (state management)
+### Log Analysis (Pattern + AI)
+- 10 built-in error patterns: OOM, connection errors, disk full, crashes, timeouts, auth failures, HTTP 5xx, exceptions, CPU spikes, DB issues
+- Automatic severity classification (Critical/Warning/Info)
+- Root cause analysis with cascading failure detection
+- Actionable fix recommendations with specific commands
 
-## Status: Planning
-- [ ] Architecture design
-- [ ] Log analysis engine
-- [ ] Anomaly detection models
-- [ ] LLM integration for RCA
-- [ ] Auto-remediation framework
-- [ ] Dashboard
+### System Metrics
+- Real-time CPU, Memory, Disk, Load Average via psutil
+- Network I/O, process count, uptime tracking
+- Health score (0-100) with automatic status classification
+- Threshold-based warnings with specific recommendations
+
+### Auto-Remediation
+- 7 predefined safe actions with risk levels
+- Dry-run mode by default (safety first)
+- Actions: clear_tmp, clear_logs, clear_cache, check_processes, check_disk, check_connections, restart_service
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/analyze-logs` | Analyze log text for anomalies |
+| GET | `/api/v1/metrics` | Raw system metrics |
+| GET | `/api/v1/metrics/analyze` | Metrics with health analysis |
+| GET | `/api/v1/remediation` | List available actions |
+| POST | `/api/v1/remediation/{name}` | Execute action (dry_run default) |
+| GET | `/` | Interactive dashboard |
+
+## Quick Start
+```bash
+pip install -r requirements.txt
+python3 main.py    # Port 8002
+```
+
+## Tested & Running
+```
+VM: 135.181.93.114:8002
+Log Analysis: 20 lines → 9 anomalies (2 critical OOM), root cause identified in 2ms
+Metrics: Real-time CPU/Memory/Disk with health scoring
+```

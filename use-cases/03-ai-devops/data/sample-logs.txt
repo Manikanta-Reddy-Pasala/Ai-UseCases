@@ -1,0 +1,20 @@
+2026-03-02 10:01:23 INFO [api-gateway] Request received: GET /api/v1/users
+2026-03-02 10:01:24 INFO [api-gateway] Response: 200 OK (45ms)
+2026-03-02 10:01:30 INFO [user-service] Processing user lookup id=1234
+2026-03-02 10:01:31 WARN [user-service] Slow query detected: SELECT * FROM users WHERE id=1234 took 2.3s
+2026-03-02 10:01:45 ERROR [payment-service] Connection refused to database host db-primary:5432
+2026-03-02 10:01:46 ERROR [payment-service] java.sql.SQLException: Connection timed out after 30000ms
+2026-03-02 10:01:47 WARN [payment-service] Retrying database connection (attempt 2/3)
+2026-03-02 10:01:50 ERROR [payment-service] Connection refused to database host db-primary:5432
+2026-03-02 10:01:51 FATAL [payment-service] All database connection attempts exhausted. Service unhealthy.
+2026-03-02 10:02:00 ERROR [api-gateway] 503 Service Unavailable: payment-service not responding
+2026-03-02 10:02:05 WARN [monitoring] CPU usage spike detected: 92% on node worker-3
+2026-03-02 10:02:10 INFO [scheduler] Cron job cleanup-logs started
+2026-03-02 10:02:15 ERROR [order-service] java.lang.OutOfMemoryError: Java heap space
+2026-03-02 10:02:16 FATAL [order-service] OOM killer terminated process PID 4523
+2026-03-02 10:02:20 WARN [api-gateway] High latency detected: avg response time 5.2s (threshold: 2s)
+2026-03-02 10:02:25 INFO [healthcheck] Service status: api-gateway=UP user-service=UP payment-service=DOWN order-service=DOWN
+2026-03-02 10:02:30 ERROR [api-gateway] 502 Bad Gateway: upstream order-service connection reset
+2026-03-02 10:03:00 INFO [auto-scaler] Scaling up worker nodes: 3 -> 5 (CPU threshold exceeded)
+2026-03-02 10:03:15 WARN [disk-monitor] Disk usage at 87% on /var/log partition
+2026-03-02 10:03:20 INFO [deployment] Rolling update started: order-service v2.3.1 -> v2.3.2

@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  agentic-platform:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - AGENT_MODE=demo
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=INFO
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:

@@ -1,288 +1,424 @@
-"""2G/3G/4G/5G Spectrum Band Identifier.
+"""2G/3G/4G/5G Spectrum Band Identifier — IQ Signal Analysis Edition.
 
-Complete cellular frequency band database with identification, comparison, and analysis.
+Accepts raw IQ data from any SDR, performs spectral analysis,
+detects signals, identifies the technology (2G/3G/4G/5G),
+and outputs center frequency + decoding hints.
+
+Supports: RTL-SDR (uint8/int16), HackRF (int8), USRP (float32/complex64),
+          NumPy arrays, CSV, WAV files.
 
 API:
-    GET  /api/v1/bands                       - All bands (filterable by gen)
-    GET  /api/v1/bands/{gen}                 - Bands for generation (2G/3G/4G/5G)
-    GET  /api/v1/identify?freq=3500          - Identify band by frequency
-    GET  /api/v1/search?q=middle+east        - Search bands
-    GET  /api/v1/compare                     - Compare all generations
-    GET  /api/v1/overlaps                    - Find band overlaps across gens
-    GET  /api/v1/region/{name}               - Bands for a region
-    GET  /api/v1/stats                       - Database statistics
-    GET  /                                   - Interactive explorer
+    POST /api/v1/analyze           - Analyze uploaded IQ file
+    POST /api/v1/analyze/generate  - Generate test signal and analyze
+    GET  /api/v1/bands             - Band database
+    GET  /api/v1/bands/{gen}       - Bands by generation
+    GET  /api/v1/identify?freq=    - Identify band by frequency
+    GET  /api/v1/compare           - Compare generations
+    GET  /api/v1/stats             - System stats
+    GET  /                         - Interactive UI
 """
 
+import json
 import logging
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse
+import time
 
+import numpy as np
+from fastapi import FastAPI, File, UploadFile, Query, Form
+from fastapi.responses import HTMLResponse, JSONResponse
+
+
+def _sanitize(obj):
+    """Recursively convert numpy types to Python natives for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    return obj
+
+from signal_processing.iq_reader import read_iq_data, generate_test_signal
+from signal_processing.spectral_analyzer import analyze_spectrum
+from detector.technology_classifier import classify_signal
 from bands.spectrum_db import (
     get_all_bands, get_bands_by_generation, identify_band_by_frequency, search_bands
 )
 from analyzer.frequency_analyzer import (
-    get_generation_summary, find_band_overlaps, compare_generations, get_bands_for_region
+    get_generation_summary, compare_generations, find_band_overlaps, get_bands_for_region
 )
 
 logging.basicConfig(level="INFO", format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="2G/3G/4G/5G Spectrum Band Identifier", version="1.0.0")
+app = FastAPI(title="2G/3G/4G/5G Spectrum Identifier - IQ Analysis", version="2.0.0")
+
 
 @app.on_event("startup")
 async def startup():
-    total = len(get_all_bands())
-    logger.info("Spectrum Band Identifier started | %d bands loaded | Port 8005" % total)
+    logger.info("Spectrum Identifier v2.0 started | %d bands | IQ analysis ready | Port 8005",
+                len(get_all_bands()))
 
+
+@app.post("/api/v1/analyze")
+async def analyze_iq_file(
+    file: UploadFile = File(...),
+    sample_rate: float = Form(20e6, description="Sample rate in Hz"),
+    center_freq: float = Form(0, description="Center frequency in Hz (tuned freq)"),
+    fmt: str = Form("auto", description="IQ format: auto, complex64, int16, int8, uint8, npy, csv, wav"),
+    fft_size: int = Form(4096),
+    threshold_db: float = Form(6, description="Signal detection threshold above noise floor"),
+):
+    """Analyze uploaded IQ data: detect signals, identify technology, find center frequency."""
+    start = time.time()
+    data = await file.read()
+
+    # Read IQ data
+    iq = read_iq_data(data, fmt=fmt, sample_rate=sample_rate, center_freq=center_freq)
+
+    # Spectral analysis
+    spectrum = analyze_spectrum(iq["samples"], sample_rate, center_freq, fft_size, threshold_db)
+
+    # Classify each detected signal
+    classifications = []
+    for sig in spectrum.detected_signals:
+        result = classify_signal(sig, iq["samples"], sample_rate)
+        sig.technology = result.technology
+        sig.band_info = {"generation": result.generation, "confidence": result.confidence}
+        classifications.append({
+            "technology": result.technology,
+            "generation": result.generation,
+            "confidence": result.confidence,
+            "center_freq_mhz": result.center_freq_mhz,
+            "center_freq_hz": result.center_freq_hz,
+            "bandwidth_khz": result.bandwidth_khz,
+            "matched_standard_bw_khz": result.matched_standard_bw_khz,
+            "spectral_type": result.spectral_type,
+            "snr_db": sig.snr_db,
+            "power_db": sig.power_db,
+            "decoding_hint": result.decoding_hint,
+            "band_matches": result.band_matches[:3],
+            "reasoning": result.reasoning,
+        })
+
+    # PSD for visualization (downsample for JSON)
+    psd_len = len(spectrum.psd_db)
+    step = max(1, psd_len // 1000)
+    psd_json = {
+        "freq_mhz": (spectrum.freq_axis_hz[::step] / 1e6 + center_freq / 1e6).tolist(),
+        "power_db": spectrum.psd_db[::step].tolist(),
+    }
+
+    duration_ms = int((time.time() - start) * 1000)
+
+    return JSONResponse(_sanitize({
+        "filename": file.filename,
+        "iq_info": {
+            "format": iq["format"],
+            "num_samples": iq["num_samples"],
+            "sample_rate_hz": sample_rate,
+            "center_freq_hz": center_freq,
+            "center_freq_mhz": center_freq / 1e6,
+            "duration_sec": round(iq["duration_sec"], 4),
+        },
+        "spectrum": {
+            "noise_floor_db": round(spectrum.noise_floor_db, 1),
+            "signals_detected": len(classifications),
+            "fft_size": fft_size,
+        },
+        "signals": classifications,
+        "psd": psd_json,
+        "analysis_duration_ms": duration_ms,
+    }))
+
+
+@app.post("/api/v1/analyze/generate")
+async def analyze_generated_signal(
+    signal_type: str = Query("lte", description="gsm, umts, lte, 5g_nr, multi, noise"),
+    center_freq: float = Query(1842.5e6, description="Center frequency in Hz"),
+    sample_rate: float = Query(20e6, description="Sample rate in Hz"),
+    duration_sec: float = Query(0.01, description="Duration in seconds"),
+    snr_db: float = Query(20, description="SNR in dB"),
+    fft_size: int = Query(4096),
+):
+    """Generate a synthetic test signal and analyze it."""
+    start = time.time()
+
+    iq = generate_test_signal(signal_type, center_freq, sample_rate, duration_sec, snr_db)
+    spectrum = analyze_spectrum(iq["samples"], sample_rate, center_freq, fft_size)
+
+    classifications = []
+    for sig in spectrum.detected_signals:
+        result = classify_signal(sig, iq["samples"], sample_rate)
+        classifications.append({
+            "technology": result.technology,
+            "generation": result.generation,
+            "confidence": result.confidence,
+            "center_freq_mhz": result.center_freq_mhz,
+            "bandwidth_khz": result.bandwidth_khz,
+            "matched_standard_bw_khz": result.matched_standard_bw_khz,
+            "spectral_type": result.spectral_type,
+            "snr_db": sig.snr_db,
+            "decoding_hint": result.decoding_hint,
+            "reasoning": result.reasoning,
+        })
+
+    psd_len = len(spectrum.psd_db)
+    step = max(1, psd_len // 500)
+
+    return JSONResponse(_sanitize({
+        "generated_signal": signal_type,
+        "iq_info": {
+            "num_samples": iq["num_samples"],
+            "sample_rate_hz": sample_rate,
+            "center_freq_mhz": center_freq / 1e6,
+            "duration_sec": duration_sec,
+            "snr_db": snr_db,
+        },
+        "spectrum": {
+            "noise_floor_db": round(spectrum.noise_floor_db, 1),
+            "signals_detected": len(classifications),
+        },
+        "signals": classifications,
+        "psd": {
+            "freq_mhz": (spectrum.freq_axis_hz[::step] / 1e6 + center_freq / 1e6).tolist(),
+            "power_db": spectrum.psd_db[::step].tolist(),
+        },
+        "analysis_duration_ms": int((time.time() - start) * 1000),
+    }))
+
+
+# --- Band database endpoints (kept from v1) ---
 
 @app.get("/api/v1/bands")
 async def list_bands(generation: str = None):
-    """List all bands, optionally filtered by generation."""
     if generation:
         bands = get_bands_by_generation(generation)
         return {"generation": generation, "count": len(bands), "bands": [b.to_dict() for b in bands]}
-    all_b = get_all_bands()
-    return {"count": len(all_b), "bands": [b.to_dict() for b in all_b]}
-
+    return {"count": len(get_all_bands()), "bands": [b.to_dict() for b in get_all_bands()]}
 
 @app.get("/api/v1/bands/{generation}")
-async def bands_by_generation(generation: str):
-    """Get detailed summary for a generation (2G, 3G, 4G, 5G)."""
+async def bands_by_gen(generation: str):
     return get_generation_summary(generation.upper())
 
-
 @app.get("/api/v1/identify")
-async def identify_frequency(freq: float = Query(..., description="Frequency in MHz")):
-    """Identify which band(s) a frequency belongs to."""
-    matches = identify_band_by_frequency(freq)
-    return {
-        "frequency_mhz": freq,
-        "matches_found": len(matches),
-        "bands": matches,
-        "note": "Frequency may belong to multiple bands across generations" if len(matches) > 1 else "",
-    }
-
+async def identify_freq(freq: float = Query(...)):
+    m = identify_band_by_frequency(freq)
+    return {"frequency_mhz": freq, "matches": len(m), "bands": m}
 
 @app.get("/api/v1/search")
-async def search(q: str = Query(..., description="Search query (band name, region, etc)")):
-    """Search bands by name, region, or description."""
-    results = search_bands(q)
-    return {"query": q, "results_found": len(results), "bands": results}
-
+async def search(q: str = Query(...)):
+    r = search_bands(q)
+    return {"query": q, "results": len(r), "bands": r}
 
 @app.get("/api/v1/compare")
 async def compare():
-    """Compare spectrum allocation across all generations."""
     return compare_generations()
-
 
 @app.get("/api/v1/overlaps")
 async def overlaps():
-    """Find frequency overlaps between different generations."""
     o = find_band_overlaps()
-    return {"overlaps_found": len(o), "overlaps": o}
-
+    return {"overlaps": len(o), "data": o}
 
 @app.get("/api/v1/region/{region}")
-async def region_bands(region: str):
-    """Get all bands available in a specific region."""
+async def region(region: str):
     return get_bands_for_region(region)
-
 
 @app.get("/api/v1/stats")
 async def stats():
-    """Database statistics."""
     all_b = get_all_bands()
     by_gen = {}
     for b in all_b:
         by_gen[b.generation] = by_gen.get(b.generation, 0) + 1
-    return {
-        "total_bands": len(all_b),
-        "by_generation": by_gen,
-        "duplex_modes": {"FDD": sum(1 for b in all_b if b.duplex == "FDD"),
-                        "TDD": sum(1 for b in all_b if b.duplex == "TDD"),
-                        "SDL": sum(1 for b in all_b if b.duplex == "SDL")},
-        "frequency_range_mhz": {"min": min(b.downlink_low_mhz for b in all_b),
-                                "max": max(b.downlink_high_mhz for b in all_b)},
-    }
+    return {"total_bands": len(all_b), "by_generation": by_gen,
+            "capabilities": ["iq_analysis", "fft_psd", "signal_detection", "technology_classification",
+                           "band_identification", "ofdm_detection", "center_freq_estimation"]}
 
 
 @app.get("/", response_class=HTMLResponse)
-async def explorer():
+async def ui():
     return """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Spectrum Band Identifier</title>
+<html><head><meta charset="UTF-8"><title>Spectrum Identifier v2</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
-.c{max-width:1100px;margin:0 auto;padding:2rem}
-h1{font-size:2rem;color:#22d3ee;margin-bottom:.5rem}
-.sub{color:#94a3b8;margin-bottom:2rem}
-.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1.5rem}
-.card{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:1rem;text-align:center;cursor:pointer;transition:border .2s}
-.card:hover{border-color:#22d3ee}.card.active{border-color:#22d3ee;background:#164e63}
-.card .val{font-size:1.5rem;font-weight:700}.card .lbl{font-size:.75rem;color:#94a3b8}
-.c2g .val{color:#94a3b8}.c3g .val{color:#fbbf24}.c4g .val{color:#22d3ee}.c5g .val{color:#a78bfa}
-.section{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:1.5rem;margin-bottom:1rem}
+.c{max-width:1100px;margin:0 auto;padding:1.5rem}
+h1{font-size:1.8rem;color:#22d3ee;margin-bottom:.3rem}
+.sub{color:#94a3b8;margin-bottom:1.5rem;font-size:.9rem}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1rem}
+.card{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:.75rem;text-align:center}
+.card .val{font-size:1.3rem;font-weight:700;color:#22d3ee}.card .lbl{font-size:.7rem;color:#94a3b8}
+.section{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:1.2rem;margin-bottom:1rem}
 h2{color:#22d3ee;margin-bottom:.75rem;font-size:1rem}
-input{padding:.5rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;width:200px;margin-right:.5rem}
-button{padding:.5rem 1rem;border:none;border-radius:8px;background:#0891b2;color:white;font-size:.85rem;cursor:pointer;font-weight:600;margin:.25rem}
-button:hover{background:#0e7490}
-#output{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:1rem;
-        min-height:200px;white-space:pre-wrap;font-family:monospace;font-size:.8rem;margin-top:1rem;overflow-x:auto;max-height:600px;overflow-y:auto}
-table{width:100%;border-collapse:collapse;font-size:.8rem}
-th{background:#334155;padding:.5rem;text-align:left;color:#22d3ee;position:sticky;top:0}
-td{padding:.4rem .5rem;border-bottom:1px solid #1e293b}
-tr:hover td{background:#1e293b}
-.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.7rem;margin:1px}
+button{padding:.4rem 1rem;border:none;border-radius:6px;background:#0891b2;color:white;font-size:.8rem;cursor:pointer;font-weight:600;margin:.2rem}
+button:hover{background:#0e7490}button.gen{background:#7c3aed}button.gen:hover{background:#6d28d9}
+select,input[type="number"]{padding:.4rem;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;margin:.2rem;font-size:.85rem}
+#output{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:1rem;min-height:200px;white-space:pre-wrap;font-family:monospace;font-size:.78rem;margin-top:.5rem;overflow:auto;max-height:500px}
+canvas{width:100%;height:200px;background:#0f172a;border:1px solid #334155;border-radius:8px;margin-top:.5rem}
+.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.7rem;margin:1px;font-weight:600}
 .tag-2g{background:#374151;color:#9ca3af}.tag-3g{background:#78350f;color:#fbbf24}
 .tag-4g{background:#164e63;color:#22d3ee}.tag-5g{background:#3b0764;color:#a78bfa}
-.tag-fdd{background:#1e3a5f;color:#60a5fa}.tag-tdd{background:#3f1f0a;color:#f97316}
 </style></head>
 <body><div class="c">
-<h1>2G/3G/4G/5G Spectrum Band Identifier</h1>
-<p class="sub">Complete cellular frequency band database - identify, compare, and explore</p>
+<h1>IQ Signal Analyzer &amp; Band Identifier</h1>
+<p class="sub">Feed raw IQ data from any SDR → auto-detect 2G/3G/4G/5G → get center frequency for decoding</p>
 
-<div class="grid" id="genCards">
-<div class="card c2g" onclick="loadGen('2G')"><div class="val" id="n2g">-</div><div class="lbl">2G (GSM)</div></div>
-<div class="card c3g" onclick="loadGen('3G')"><div class="val" id="n3g">-</div><div class="lbl">3G (UMTS)</div></div>
-<div class="card c4g" onclick="loadGen('4G')"><div class="val" id="n4g">-</div><div class="lbl">4G (LTE)</div></div>
-<div class="card c5g" onclick="loadGen('5G')"><div class="val" id="n5g">-</div><div class="lbl">5G (NR)</div></div>
+<div class="grid">
+<div class="card"><div class="val" id="nBands">84</div><div class="lbl">Bands in DB</div></div>
+<div class="card"><div class="val" id="nSigs">-</div><div class="lbl">Signals Found</div></div>
+<div class="card"><div class="val" id="nTech">-</div><div class="lbl">Technology</div></div>
+<div class="card"><div class="val" id="nFreq">-</div><div class="lbl">Center MHz</div></div>
 </div>
 
 <div class="section">
-<h2>Identify Frequency</h2>
-<input type="number" id="freqInput" placeholder="Enter MHz (e.g. 3500)" step="0.1">
-<button onclick="identifyFreq()">Identify Band</button>
-<button onclick="identifyFreq(617)">617 MHz</button>
-<button onclick="identifyFreq(900)">900 MHz</button>
-<button onclick="identifyFreq(1800)">1800 MHz</button>
-<button onclick="identifyFreq(2100)">2100 MHz</button>
-<button onclick="identifyFreq(2600)">2600 MHz</button>
-<button onclick="identifyFreq(3500)">3500 MHz</button>
-<button onclick="identifyFreq(28000)">28 GHz</button>
+<h2>1. Generate Test Signal &amp; Analyze</h2>
+<select id="sigType">
+<option value="lte">LTE (10MHz OFDM)</option>
+<option value="gsm">GSM (200kHz GMSK)</option>
+<option value="umts">UMTS (5MHz CDMA)</option>
+<option value="5g_nr">5G NR (50MHz OFDM)</option>
+<option value="multi">Multi (GSM + LTE)</option>
+</select>
+<label>Center MHz: <input type="number" id="cfreq" value="1842.5" step="0.1" style="width:100px"></label>
+<label>SR MHz: <input type="number" id="sr" value="20" step="1" style="width:60px"></label>
+<label>SNR dB: <input type="number" id="snr" value="20" step="1" style="width:50px"></label>
+<button class="gen" onclick="analyzeGenerated()">Generate &amp; Analyze</button>
 </div>
 
 <div class="section">
-<h2>Explore</h2>
-<button onclick="loadCompare()">Compare Generations</button>
-<button onclick="loadOverlaps()">Find Overlaps</button>
-<button onclick="loadRegion('Middle East')">Middle East Bands</button>
-<button onclick="loadRegion('Europe')">Europe</button>
-<button onclick="loadRegion('Americas')">Americas</button>
-<button onclick="loadRegion('Asia')">Asia</button>
-<input type="text" id="searchInput" placeholder="Search (e.g. mmWave)" style="width:150px">
-<button onclick="searchBands()">Search</button>
+<h2>2. Upload IQ File</h2>
+<p style="font-size:.8rem;color:#94a3b8;margin-bottom:.5rem">Supports: RTL-SDR (uint8), HackRF (int8), USRP (float32), .npy, .csv, .wav</p>
+<input type="file" id="iqFile" style="font-size:.8rem">
+<label>SR Hz: <input type="number" id="fileSR" value="20000000" style="width:120px"></label>
+<label>Center Hz: <input type="number" id="fileFC" value="0" style="width:120px"></label>
+<button onclick="analyzeFile()">Upload &amp; Analyze</button>
 </div>
 
-<div id="output">Click a generation card or enter a frequency to explore the spectrum database.</div>
+<canvas id="psdCanvas"></canvas>
+<div id="output">Click "Generate & Analyze" to see IQ signal analysis with technology identification.
+
+Supported signal types:
+  • GSM:   200kHz single carrier (GMSK) — identifiable by narrow bandwidth
+  • UMTS:  5MHz wideband CDMA — flat spectrum, no OFDM subcarriers
+  • LTE:   1.4-20MHz OFDM — 15kHz subcarrier spacing, cyclic prefix correlation
+  • 5G NR: up to 100MHz OFDM — 30/60/120kHz SCS, wider bandwidth
+</div>
+
+<div class="section">
+<h2>3. Band Database</h2>
+<label>Freq MHz: <input type="number" id="freqLookup" value="3500" step="0.1" style="width:100px"></label>
+<button onclick="lookupFreq()">Identify Band</button>
+<button onclick="loadGen('2G')">2G</button><button onclick="loadGen('3G')">3G</button>
+<button onclick="loadGen('4G')">4G</button><button onclick="loadGen('5G')">5G</button>
+<button onclick="loadCompare()">Compare All</button>
+</div>
 </div>
 
 <script>
-async function loadStats(){
-  const r=await fetch('/api/v1/stats');const d=await r.json();
-  document.getElementById('n2g').textContent=d.by_generation['2G']||0;
-  document.getElementById('n3g').textContent=d.by_generation['3G']||0;
-  document.getElementById('n4g').textContent=d.by_generation['4G']||0;
-  document.getElementById('n5g').textContent=d.by_generation['5G']||0;
+const canvas=document.getElementById('psdCanvas');
+const ctx=canvas.getContext('2d');
+
+function drawPSD(psd){
+  const w=canvas.width=canvas.offsetWidth;const h=canvas.height=200;
+  ctx.fillStyle='#0f172a';ctx.fillRect(0,0,w,h);
+  if(!psd||!psd.freq_mhz||!psd.freq_mhz.length)return;
+  const freqs=psd.freq_mhz,powers=psd.power_db;
+  const minP=Math.min(...powers),maxP=Math.max(...powers);
+  const range=maxP-minP||1;
+  ctx.strokeStyle='#22d3ee';ctx.lineWidth=1;ctx.beginPath();
+  for(let i=0;i<freqs.length;i++){
+    const x=i/freqs.length*w;
+    const y=h-(powers[i]-minP)/range*h*0.85-h*0.05;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  // Axis labels
+  ctx.fillStyle='#94a3b8';ctx.font='10px monospace';
+  ctx.fillText(freqs[0].toFixed(1)+' MHz',5,h-5);
+  ctx.fillText(freqs[freqs.length-1].toFixed(1)+' MHz',w-80,h-5);
+  ctx.fillText(maxP.toFixed(0)+' dB',5,15);
 }
 
-function tag(gen){return '<span class="tag tag-'+gen.toLowerCase()+'">'+gen+'</span>'}
-function dtag(d){return '<span class="tag tag-'+d.toLowerCase()+'">'+d+'</span>'}
+async function analyzeGenerated(){
+  const type=document.getElementById('sigType').value;
+  const cf=document.getElementById('cfreq').value*1e6;
+  const sr=document.getElementById('sr').value*1e6;
+  const snr=document.getElementById('snr').value;
+  document.getElementById('output').textContent='Generating '+type+' signal and analyzing...';
+  try{
+    const r=await fetch('/api/v1/analyze/generate?signal_type='+type+'&center_freq='+cf+'&sample_rate='+sr+'&snr_db='+snr+'&duration_sec=0.01',{method:'POST'});
+    const d=await r.json();
+    drawPSD(d.psd);
+    let out='IQ Analysis: '+type.toUpperCase()+' signal @ '+d.iq_info.center_freq_mhz+' MHz\\n';
+    out+='Samples: '+d.iq_info.num_samples+' | SR: '+(d.iq_info.sample_rate_hz/1e6)+'MHz | Duration: '+d.iq_info.duration_sec+'s\\n';
+    out+='Noise floor: '+d.spectrum.noise_floor_db+' dB | Signals detected: '+d.spectrum.signals_detected+'\\n';
+    out+='Analysis time: '+d.analysis_duration_ms+'ms\\n';
+    out+='\\n'+'='.repeat(60)+'\\n';
+    if(d.signals.length===0){out+='\\nNo signals detected above noise floor.\\n';}
+    d.signals.forEach((s,i)=>{
+      out+='\\nSIGNAL '+(i+1)+': '+s.technology+' ('+s.generation+')\\n';
+      out+='  Confidence: '+(s.confidence*100).toFixed(1)+'%\\n';
+      out+='  Center Frequency: '+s.center_freq_mhz+' MHz ('+s.center_freq_hz+' Hz)\\n';
+      out+='  Bandwidth: '+s.bandwidth_khz+' kHz';
+      if(s.matched_standard_bw_khz)out+=' (standard: '+s.matched_standard_bw_khz+' kHz)';
+      out+='\\n  Spectral type: '+s.spectral_type+'\\n';
+      out+='  SNR: '+s.snr_db+' dB\\n';
+      out+='  DECODING: '+s.decoding_hint+'\\n';
+      out+='  Reasoning:\\n';
+      s.reasoning.forEach(r=>out+='    • '+r+'\\n');
+    });
+    document.getElementById('output').textContent=out;
+    if(d.signals.length>0){
+      document.getElementById('nSigs').textContent=d.signals.length;
+      document.getElementById('nTech').textContent=d.signals[0].technology;
+      document.getElementById('nFreq').textContent=d.signals[0].center_freq_mhz;
+    }
+  }catch(e){document.getElementById('output').textContent='Error: '+e.message;}
+}
 
-async function loadGen(gen){
-  const r=await fetch('/api/v1/bands/'+gen);const d=await r.json();
-  let html='<h3>'+gen+' Bands ('+d.total_bands+' bands)</h3><br>';
-  html+='<table><tr><th>Band</th><th>Name</th><th>Duplex</th><th>UL (MHz)</th><th>UL Mid</th><th>DL (MHz)</th><th>DL Mid</th><th>BW</th><th>Regions</th></tr>';
-  (d.bands||[]).forEach(b=>{
-    const ul=b.uplink_mhz, dl=b.downlink_mhz;
-    html+='<tr><td><b>'+b.band_number+'</b></td><td>'+b.name+'</td><td>'+dtag(b.duplex)+'</td>';
-    html+='<td>'+ul.low+' - '+ul.high+'</td><td><b>'+ul.mid+'</b></td>';
-    html+='<td>'+dl.low+' - '+dl.high+'</td><td><b>'+dl.mid+'</b></td>';
-    html+='<td>'+dl.bandwidth+'</td>';
-    html+='<td>'+b.regions.join(', ')+'</td></tr>';
+async function analyzeFile(){
+  const f=document.getElementById('iqFile').files[0];if(!f)return;
+  const fd=new FormData();fd.append('file',f);
+  fd.append('sample_rate',document.getElementById('fileSR').value);
+  fd.append('center_freq',document.getElementById('fileFC').value);
+  fd.append('fmt','auto');fd.append('fft_size','4096');fd.append('threshold_db','6');
+  document.getElementById('output').textContent='Analyzing '+f.name+'...';
+  try{const r=await fetch('/api/v1/analyze',{method:'POST',body:fd});
+  const d=await r.json();drawPSD(d.psd);
+  let out='File: '+d.filename+' | Format: '+d.iq_info.format+'\\n';
+  out+='Samples: '+d.iq_info.num_samples+' | Signals: '+d.spectrum.signals_detected+'\\n\\n';
+  d.signals.forEach((s,i)=>{
+    out+='SIGNAL '+(i+1)+': '+s.technology+' ('+s.generation+') conf='+(s.confidence*100).toFixed(0)+'%\\n';
+    out+='  Center: '+s.center_freq_mhz+' MHz | BW: '+s.bandwidth_khz+' kHz | SNR: '+s.snr_db+' dB\\n';
+    out+='  DECODE: '+s.decoding_hint+'\\n\\n';
   });
-  html+='</table>';
-  document.getElementById('output').innerHTML=html;
+  document.getElementById('output').textContent=out;}catch(e){document.getElementById('output').textContent='Error: '+e.message;}
 }
 
-async function identifyFreq(f){
-  const freq=f||document.getElementById('freqInput').value;
-  if(!freq)return;
-  document.getElementById('freqInput').value=freq;
-  const r=await fetch('/api/v1/identify?freq='+freq);const d=await r.json();
-  let html='<h3>Frequency: '+d.frequency_mhz+' MHz - '+d.matches_found+' band(s) found</h3><br>';
-  if(!d.bands.length){html+='<p>No matching bands found for this frequency.</p>';document.getElementById('output').innerHTML=html;return;}
-  html+='<table><tr><th>Gen</th><th>Band</th><th>Name</th><th>Match</th><th>Duplex</th><th>Range (MHz)</th><th>Mid Freq</th><th>Offset</th><th>Category</th></tr>';
-  d.bands.forEach(b=>{
-    const info=b.match_type==='downlink'?b.downlink_mhz:b.uplink_mhz;
-    html+='<tr><td>'+tag(b.generation)+'</td><td><b>'+b.band_number+'</b></td><td>'+b.name+'</td>';
-    html+='<td>'+b.match_type+'</td><td>'+dtag(b.duplex)+'</td>';
-    html+='<td>'+info.low+' - '+info.high+'</td><td><b>'+info.mid+'</b></td>';
-    html+='<td>'+b.offset_from_center_mhz+' MHz</td><td>'+b.frequency_category+'</td></tr>';
-  });
-  html+='</table>';
-  document.getElementById('output').innerHTML=html;
+async function lookupFreq(){
+  const f=document.getElementById('freqLookup').value;
+  const r=await fetch('/api/v1/identify?freq='+f);const d=await r.json();
+  let out='Frequency '+d.frequency_mhz+' MHz → '+d.matches+' band(s):\\n\\n';
+  d.bands.forEach(b=>{out+=b.generation+' '+b.name+' (Band '+b.band_number+') ['+b.match_type+'] mid='+b.downlink_mhz.mid+' MHz\\n';});
+  document.getElementById('output').textContent=out;
 }
-
+async function loadGen(g){
+  const r=await fetch('/api/v1/bands/'+g);const d=await r.json();
+  let out=g+': '+d.total_bands+' bands\\n\\n';
+  (d.bands||[]).forEach(b=>{out+='Band '+b.band_number+' '+b.name+': DL '+b.downlink_mhz.low+'-'+b.downlink_mhz.high+' MHz (mid='+b.downlink_mhz.mid+') '+b.duplex+'\\n';});
+  document.getElementById('output').textContent=out;
+}
 async function loadCompare(){
   const r=await fetch('/api/v1/compare');const d=await r.json();
-  let html='<h3>Generation Comparison</h3><br><table><tr><th>Generation</th><th>Bands</th><th>Total DL Spectrum</th><th>Freq Range</th><th>Duplex</th><th>Max Ch BW</th></tr>';
-  ['2G','3G','4G','5G'].forEach(g=>{
-    const s=d[g];
-    html+='<tr><td>'+tag(g)+'</td><td>'+s.band_count+'</td><td><b>'+s.total_downlink_spectrum_mhz+' MHz</b></td>';
-    html+='<td>'+s.lowest_freq_mhz+' - '+s.highest_freq_mhz+' MHz</td>';
-    html+='<td>'+s.duplex_modes.map(dtag).join(' ')+'</td><td>'+s.max_channel_bw_mhz+' MHz</td></tr>';
-  });
-  html+='</table>';
-  document.getElementById('output').innerHTML=html;
+  let out='Generation Comparison:\\n\\n';
+  ['2G','3G','4G','5G'].forEach(g=>{const s=d[g];out+=g+': '+s.band_count+' bands | '+s.total_downlink_spectrum_mhz+' MHz total | '+s.lowest_freq_mhz+'-'+s.highest_freq_mhz+' MHz | max BW='+s.max_channel_bw_mhz+'MHz\\n';});
+  document.getElementById('output').textContent=out;
 }
-
-async function loadOverlaps(){
-  const r=await fetch('/api/v1/overlaps');const d=await r.json();
-  let html='<h3>Cross-Generation Frequency Overlaps ('+d.overlaps_found+')</h3><br>';
-  html+='<table><tr><th>Band 1</th><th>Band 2</th><th>Overlap Type</th><th>Overlap</th><th>Range</th></tr>';
-  d.overlaps.forEach(o=>{
-    html+='<tr><td>'+o.band_1+'</td><td>'+o.band_2+'</td><td>'+o.overlap_type+'</td>';
-    html+='<td><b>'+o.overlap_mhz+' MHz</b></td><td>'+o.range_mhz+'</td></tr>';
-  });
-  html+='</table>';
-  document.getElementById('output').innerHTML=html;
-}
-
-async function loadRegion(region){
-  const r=await fetch('/api/v1/region/'+region);const d=await r.json();
-  let html='<h3>'+d.region+' - '+d.total_bands+' bands</h3><br>';
-  ['2G','3G','4G','5G'].forEach(g=>{
-    const bands=d.by_generation[g];
-    if(!bands.length)return;
-    html+='<h4>'+tag(g)+' ('+bands.length+' bands)</h4><table><tr><th>Band</th><th>Name</th><th>DL Range</th><th>DL Mid</th><th>Duplex</th><th>Notes</th></tr>';
-    bands.forEach(b=>{
-      html+='<tr><td><b>'+b.band_number+'</b></td><td>'+b.name+'</td>';
-      html+='<td>'+b.downlink_mhz.low+'-'+b.downlink_mhz.high+'</td><td><b>'+b.downlink_mhz.mid+'</b></td>';
-      html+='<td>'+dtag(b.duplex)+'</td><td>'+b.notes+'</td></tr>';
-    });
-    html+='</table><br>';
-  });
-  document.getElementById('output').innerHTML=html;
-}
-
-async function searchBands(){
-  const q=document.getElementById('searchInput').value;
-  if(!q)return;
-  const r=await fetch('/api/v1/search?q='+encodeURIComponent(q));const d=await r.json();
-  let html='<h3>Search: "'+d.query+'" - '+d.results_found+' results</h3><br>';
-  html+='<table><tr><th>Gen</th><th>Band</th><th>Name</th><th>DL Range</th><th>DL Mid</th><th>Duplex</th><th>Regions</th></tr>';
-  d.bands.forEach(b=>{
-    html+='<tr><td>'+tag(b.generation)+'</td><td><b>'+b.band_number+'</b></td><td>'+b.name+'</td>';
-    html+='<td>'+b.downlink_mhz.low+'-'+b.downlink_mhz.high+'</td><td><b>'+b.downlink_mhz.mid+'</b></td>';
-    html+='<td>'+dtag(b.duplex)+'</td><td>'+b.regions.join(', ')+'</td></tr>';
-  });
-  html+='</table>';
-  document.getElementById('output').innerHTML=html;
-}
-
-loadStats();
 </script></body></html>"""
 
 

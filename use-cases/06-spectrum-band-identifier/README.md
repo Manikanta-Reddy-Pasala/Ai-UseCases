@@ -1,71 +1,132 @@
-# Use Case 6: 2G/3G/4G/5G Spectrum Band Identifier
+# IQ Signal Analyzer & 2G/3G/4G/5G Band Identifier
 
-## Complete Cellular Frequency Band Database
+## Feed Raw IQ Data → Auto-Detect Technology → Get Center Frequency for Decoding
 
-Comprehensive tool for identifying, comparing, and exploring all cellular frequency bands from 2G GSM through 5G NR mmWave. Built from 3GPP specifications (TS 36.101, TS 38.101, TS 25.101, TS 45.005).
+Takes raw IQ samples from **any SDR** (RTL-SDR, HackRF, USRP, or file), runs FFT spectral analysis, detects signals, classifies the cellular technology (GSM/UMTS/LTE/5G NR), and outputs the **exact center frequency + decoding command**.
 
-## Database Coverage
+---
 
-| Generation | Bands | Frequency Range | Max Channel BW | Key Bands |
-|-----------|-------|-----------------|----------------|-----------|
-| **2G (GSM)** | 10 | 450 - 1990 MHz | 200 kHz | GSM-900, DCS-1800, PCS-1900 |
-| **3G (UMTS)** | 14 | 791 - 2690 MHz | 5 MHz | Band 1 (IMT), Band 8 (900) |
-| **4G (LTE)** | 34 | 462 - 5925 MHz | 20 MHz | Band 3, 7, 20, 28, 41, 42 |
-| **5G (NR)** | 26 | 617 - 40000 MHz | 400 MHz | n77, n78, n257, n258, n260 |
-| **Total** | **84 bands** | **460 MHz - 40 GHz** | | |
-
-## Features
-
-- **Frequency Identification**: Enter any frequency in MHz, get all matching bands across all generations
-- **Generation Comparison**: Side-by-side comparison of 2G/3G/4G/5G spectrum
-- **Mid-Frequency Calculation**: Automatic center frequency for every band
-- **Regional Filtering**: Find bands deployed in Middle East, Europe, Americas, Asia
-- **Overlap Detection**: Cross-generation frequency overlap analysis
-- **Search**: Search by band name, region, or description
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/bands` | All 84 bands |
-| GET | `/api/v1/bands/{gen}` | Bands by generation |
-| GET | `/api/v1/identify?freq=3500` | Identify band by frequency |
-| GET | `/api/v1/search?q=mmWave` | Search bands |
-| GET | `/api/v1/compare` | Compare generations |
-| GET | `/api/v1/overlaps` | Cross-gen overlaps |
-| GET | `/api/v1/region/{name}` | Regional bands |
-| GET | `/` | Interactive explorer |
-
-## Example: 3500 MHz Identification
+### The Pipeline (1.2ms)
 
 ```
-GET /api/v1/identify?freq=3500
-
-→ 6 matches:
-  4G Band 42 (CBRS) - mid: 3500.0 MHz
-  5G Band n77 (C-Band) - mid: 3750.0 MHz
-  5G Band n78 (C-Band) - mid: 3550.0 MHz  ← Most deployed 5G band worldwide
+                    RAW IQ DATA
+                    (any format)
+                         │
+     ┌───────────────────┼───────────────────┐
+     │    RTL-SDR        │     HackRF        │     USRP
+     │    uint8/int16    │     int8           │     float32/complex64
+     │    .npy  .csv     │     .wav           │
+     └───────────────────┼───────────────────┘
+                         │
+                         ▼
+              ┌─────────────────────┐
+              │    IQ READER        │  Auto-detect format
+              │    Parse → complex64│  Normalize to [-1, 1]
+              └──────────┬──────────┘
+                         │                          ⏱ 0.1ms
+                         ▼
+              ┌─────────────────────┐
+              │  FFT SPECTRAL       │  Raw numpy FFT (not scipy)
+              │  ANALYSIS           │  Hanning window + averaging
+              │                     │  2048-pt FFT, 8 frame avg
+              │  Output: PSD (dB)   │
+              └──────────┬──────────┘
+                         │                          ⏱ 0.3ms
+                         ▼
+              ┌─────────────────────┐
+              │  SIGNAL DETECTION   │  Vectorized threshold crossing
+              │                     │  Noise floor = 25th percentile
+              │  • Find peaks       │  Threshold = noise + 6dB
+              │  • Measure BW       │  Power-weighted centroid
+              │  • Calc center freq │  for center frequency
+              └──────────┬──────────┘
+                         │                          ⏱ 0.5ms
+                         ▼
+              ┌─────────────────────┐
+              │  TECHNOLOGY         │  4-stage classification:
+              │  CLASSIFIER         │
+              │                     │  1. Bandwidth matching
+              │  GSM:    200 kHz    │     (vs known standards)
+              │  UMTS:   5 MHz      │
+              │  LTE:    1.4-20 MHz │  2. OFDM CP detection
+              │  5G NR:  5-100 MHz  │     (cyclic prefix corr)
+              │  5G FR2: 50-400 MHz │
+              │                     │  3. Subcarrier spacing
+              │                     │     (15kHz=LTE, 30kHz=NR)
+              │                     │
+              │                     │  4. Band DB lookup
+              │                     │     (84 bands, 3GPP)
+              └──────────┬──────────┘
+                         │                          ⏱ 0.3ms
+                         ▼
+     ┌───────────────────────────────────────────┐
+     │              OUTPUT                        │
+     │                                            │
+     │  Technology: LTE (4G)                      │
+     │  Confidence: 74%                           │
+     │  Center Frequency: 1842.500 MHz            │
+     │  Bandwidth: 10 MHz                         │
+     │  SNR: 55.6 dB                              │
+     │                                            │
+     │  DECODE: srsRAN fc=1842.500M bw=10M        │
+     │          SCS=15kHz                         │
+     └───────────────────────────────────────────┘
+                                            Total: ⏱ 1.2ms
 ```
 
-## Middle East Bands
+### Performance
 
-```
-2G: GSM-900, E-GSM-900, DCS-1800
-4G: Band 3 (1800), Band 8 (900), Band 20 (800), Band 28 (700), Band 42 (3500)
-5G: n3 (1800), n20 (800), n28 (700), n78 (3500 C-Band)
-```
+| Metric | Value |
+|--------|-------|
+| **Analysis pipeline** | **1.2 ms** (FFT + detect + classify) |
+| FFT (2048-pt) | 0.3 ms |
+| Signal detection | 0.5 ms |
+| OFDM + classification | 0.3 ms |
+| Real file Band 8 (14MB) | 12 ms (incl. HTTP upload) |
+| Real file Band 3 (34MB) | 35 ms (incl. HTTP upload) |
 
-## Quick Start
+### Supported IQ Formats
+
+| Format | Source | Extension |
+|--------|--------|-----------|
+| uint8 | RTL-SDR raw | .bin, .raw |
+| int16 | RTL-SDR | .dat |
+| int8 | HackRF | .cs8, .dat |
+| float32 interleaved | USRP, MATLAB | .dat, .bin |
+| complex64 | GNU Radio, NumPy | .cf32 |
+| NumPy | Python | .npy |
+| CSV | Any (I,Q columns) | .csv |
+| WAV | SDR#, HDSDR | .wav |
+
+### Tested with Real IQ Data
+
+| Sample | Band | Signals | Center Freq | Time |
+|--------|------|---------|-------------|------|
+| sample_vec_B3.dat (34MB) | LTE Band 3 | 2 | 1842.500 MHz | 35ms |
+| sample_vec_B8.dat (14MB) | LTE Band 8 | 2 | 942.500 MHz | 12ms |
+| sample_vec_B1.dat (24MB) | LTE Band 1 | - | 2140 MHz | - |
+| sample_vec_B20.dat (9MB) | LTE Band 20 | - | 806 MHz | - |
+| sample_vec_B28.dat (19MB) | LTE Band 28 | - | 780.5 MHz | - |
+
+### Quick Start
+
 ```bash
 pip install -r requirements.txt
-python3 main.py    # Port 8005
-# Open http://localhost:8005
+python3 main.py   # Port 8005
+
+# Analyze real IQ file
+curl -X POST http://localhost:8005/api/v1/analyze \
+  -F "file=@sample_vec_B3.dat" \
+  -F "sample_rate=30720000" \
+  -F "center_freq=1842500000" \
+  -F "fmt=float32"
+
+# Generate test signal and analyze
+curl -X POST "http://localhost:8005/api/v1/analyze/generate?signal_type=lte&center_freq=1842500000"
 ```
 
-## Tested & Running
-```
-VM: 135.181.93.114:8005
-84 bands loaded (10 GSM + 14 UMTS + 34 LTE + 26 NR)
-Frequency range: 460 MHz to 40 GHz
-3GPP compliant band definitions
-```
+### Live: http://135.181.93.114:8005
+
+---
+
+**Detailed Docs**: [ARCHITECTURE.md](ARCHITECTURE.md) | [IMPLEMENTATION.md](IMPLEMENTATION.md)

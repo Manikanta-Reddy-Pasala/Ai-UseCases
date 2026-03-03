@@ -1,70 +1,84 @@
-# Use Case 3: AI-Powered DevOps
+# AI-Powered DevOps Platform
 
-## Intelligent Log Analysis, Metrics Monitoring, and Auto-Remediation
+## Intelligent Log Analysis, Metrics Monitoring & Auto-Remediation
 
-AI-powered DevOps platform that analyzes logs for anomalies, monitors system metrics, provides root cause analysis, and offers safe auto-remediation actions.
+Detect production issues before users do. This platform analyzes logs for anomalies, monitors system health in real-time, identifies root causes, and offers safe one-click remediation actions.
 
-## Architecture
+---
+
+### How It Works
 
 ```
-                         ┌─────────────────┐
-                         │  FastAPI Server  │
-                         │   Port 8002      │
-                         └────────┬────────┘
-                                  │
-              ┌───────────────────┼───────────────────┐
-              │                   │                   │
-    ┌─────────▼──────┐  ┌────────▼────────┐  ┌──────▼────────┐
-    │  Log Analyzer   │  │ Metric Analyzer │  │ Remediation   │
-    │ (Pattern+AI)    │  │   (psutil)      │  │  (Actions)    │
-    └────────┬───────┘  └────────┬────────┘  └──────┬────────┘
-             │                   │                   │
-    ┌────────▼───────┐  ┌────────▼────────┐  ┌──────▼────────┐
-    │ 10 Error       │  │ CPU/Mem/Disk    │  │ 7 Safe        │
-    │ Patterns       │  │ Load/Network    │  │ Actions       │
-    │ + Claude AI    │  │ Health Score    │  │ + Dry Run     │
-    └────────────────┘  └─────────────────┘  └───────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    APPLICATION LOGS                            │
+│                                                               │
+│  ERROR [payment] Connection refused to db:5432                │
+│  ERROR [order] OutOfMemoryError: Java heap space              │
+│  FATAL [order] OOM killer terminated PID 4523                 │
+│  ERROR [gateway] 502 Bad Gateway                              │
+│  WARN  [user] Slow query took 2.3s                            │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+                           ▼
+            ┌──────────────────────────────┐
+            │       PATTERN ANALYZER       │
+            │                              │
+            │  10 Detection Patterns:      │
+            │  • OOM / Memory exhaustion   │
+            │  • Connection refused/timeout │
+            │  • HTTP 5xx errors           │
+            │  • Disk full                 │
+            │  • CPU spike                 │
+            │  • Slow queries / deadlocks  │
+            │  • Auth failures             │
+            │  • Crashes / segfaults       │
+            │  • Exceptions / tracebacks   │
+            │  • Timeout / deadline        │
+            └──────────┬───────────────────┘
+                       │
+         ┌─────────────┼─────────────┐
+         ▼             ▼             ▼
+   ┌──────────┐  ┌──────────┐  ┌──────────────┐
+   │ ANOMALY  │  │  ROOT    │  │ RECOMMENDED  │
+   │ LIST     │  │  CAUSE   │  │ ACTIONS      │
+   │          │  │          │  │              │
+   │ 6 found  │  │ Memory   │  │ • free -h    │
+   │ 2 CRIT   │  │ exhaust  │  │ • top -o MEM │
+   │ 4 WARN   │  │ cascade  │  │ • check heap │
+   └──────────┘  └──────────┘  └──────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│                   SYSTEM METRICS (real-time)                   │
+│                                                               │
+│   CPU: 12%  │  Memory: 21%  │  Disk: 72%  │  Health: 100    │
+│   ████░░░░  │  ██░░░░░░░░░  │  ███████░░  │  ██████████     │
+│                                                               │
+│   Load Avg: 0.06  │  Processes: 224  │  Uptime: 21.2 days   │
+└──────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│                   AUTO-REMEDIATION                            │
+│                                                               │
+│   [Check Processes]  [Check Disk]  [Check Network]           │
+│   [Clear Cache]      [Clean Temp]  [Truncate Logs]           │
+│                                                               │
+│   All actions: DRY RUN by default (safety first)             │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## Key Features
+### Key Capabilities
 
-### Log Analysis (Pattern + AI)
-- 10 built-in error patterns: OOM, connection errors, disk full, crashes, timeouts, auth failures, HTTP 5xx, exceptions, CPU spikes, DB issues
-- Automatic severity classification (Critical/Warning/Info)
-- Root cause analysis with cascading failure detection
-- Actionable fix recommendations with specific commands
+| Feature | Details |
+|---------|---------|
+| **Log Analysis** | 10 pattern detectors, severity classification, root cause |
+| **System Metrics** | CPU, Memory, Disk, Load, Network via psutil |
+| **Health Scoring** | 0-100 score with threshold-based warnings |
+| **Root Cause** | Cascading failure detection (OOM → service down → 502) |
+| **Remediation** | 7 safe actions, dry-run default, risk-level tagged |
+| **AI Analysis** | Claude SDK for deep log interpretation (real mode) |
 
-### System Metrics
-- Real-time CPU, Memory, Disk, Load Average via psutil
-- Network I/O, process count, uptime tracking
-- Health score (0-100) with automatic status classification
-- Threshold-based warnings with specific recommendations
+### Live: http://135.181.93.114:8002
 
-### Auto-Remediation
-- 7 predefined safe actions with risk levels
-- Dry-run mode by default (safety first)
-- Actions: clear_tmp, clear_logs, clear_cache, check_processes, check_disk, check_connections, restart_service
+---
 
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/analyze-logs` | Analyze log text for anomalies |
-| GET | `/api/v1/metrics` | Raw system metrics |
-| GET | `/api/v1/metrics/analyze` | Metrics with health analysis |
-| GET | `/api/v1/remediation` | List available actions |
-| POST | `/api/v1/remediation/{name}` | Execute action (dry_run default) |
-| GET | `/` | Interactive dashboard |
-
-## Quick Start
-```bash
-pip install -r requirements.txt
-python3 main.py    # Port 8002
-```
-
-## Tested & Running
-```
-VM: 135.181.93.114:8002
-Log Analysis: 20 lines → 9 anomalies (2 critical OOM), root cause identified in 2ms
-Metrics: Real-time CPU/Memory/Disk with health scoring
-```
+**Detailed Docs**: [ARCHITECTURE.md](ARCHITECTURE.md) | [IMPLEMENTATION.md](IMPLEMENTATION.md)

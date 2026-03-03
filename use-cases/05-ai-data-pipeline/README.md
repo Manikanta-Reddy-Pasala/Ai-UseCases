@@ -1,61 +1,85 @@
-# Use Case 5: AI Data Pipeline
+# AI Data Pipeline
 
-## Real-Time Event Ingestion, Feature Engineering, and Model Serving
+## Real-Time Events → Feature Engineering → Model Serving → A/B Testing
 
-Full ML pipeline demonstrating: event ingestion → feature computation → model serving with A/B testing. Simulates an e-commerce purchase propensity prediction system.
+Complete ML pipeline that ingests user events, computes features in real-time, serves predictions from multiple models, and runs A/B tests to find the best model.
 
-## Architecture
+---
 
-```
-Events → Ingestion → Feature Store → Model Server → Predictions
-  │          │             │              │              │
-  │    Event Store    Compute 15+    2 Models       A/B Testing
-  │   (in-memory)    features from   (logistic      (v1 vs v2)
-  │                  event history    regression)
-  │
-  └── page_view, add_to_cart, purchase, search, wishlist, etc.
-```
-
-## Components
-
-| Component | File | Purpose |
-|-----------|------|---------|
-| Event Ingestion | `pipeline/ingestion.py` | Ingest, store, generate sample events |
-| Feature Store | `features/store.py` | Compute 15+ features from event history |
-| Model Server | `serving/model_server.py` | Predictions with A/B testing |
-| API | `main.py` | FastAPI with interactive dashboard |
-
-## Features Computed (15+)
-
-- **Count features**: page_views, cart_adds, purchases, searches
-- **Ratio features**: cart_to_view_ratio, purchase_to_view_ratio
-- **Monetary features**: total_cart_value, avg_cart_item_price
-- **Engagement features**: total_browse_time, avg_page_duration
-- **Session features**: unique_sessions
-
-## Models
-
-- **purchase_propensity_v1**: Logistic regression with 7 weighted features
-- **purchase_propensity_v2**: Updated weights with browse time and search features
-- A/B testing compares model confidence for winner selection
-
-## Tested Results
+### The Pipeline
 
 ```
-VM: 135.181.93.114:8004
-Events: 30 ingested → 15 features computed → prediction in 0.14ms
-A/B Test: v1 vs v2, winner selected by confidence
-Pipeline latency: <1ms end-to-end
+┌──────────────────────────────────────────────────────────────┐
+│                      EVENT INGESTION                          │
+│                                                               │
+│   page_view ──┐                                               │
+│   add_to_cart ┤                                               │
+│   purchase ───┤──► Event Store ──► Entity Events              │
+│   search ─────┤       │              (by user_id)             │
+│   wishlist ───┘       │                                       │
+│                       ▼                                       │
+│              25 events/user                                   │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────┐
+│                    FEATURE ENGINEERING                         │
+│                                                               │
+│   15+ Features Computed:                                      │
+│                                                               │
+│   Count:    page_views=9, cart_adds=6, purchases=4            │
+│   Ratios:   cart_to_view=0.67, purchase_to_view=0.44          │
+│   Money:    cart_value=$389, avg_item=$65                      │
+│   Engage:   browse_time=675s, avg_page=75s                    │
+│   Sessions: unique_sessions=5                                 │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────┐
+│                    MODEL SERVING                              │
+│                                                               │
+│   ┌─────────────────┐    ┌─────────────────┐                 │
+│   │  Model v1        │    │  Model v2        │                │
+│   │  7 features      │    │  7 features      │                │
+│   │  cart_ratio: 3.5 │    │  cart_ratio: 4.0 │                │
+│   │  purchase: 2.0   │    │  browse_time:0.003│               │
+│   │                  │    │  searches: 0.2   │                │
+│   │  score: 0.999    │    │  score: 0.999    │                │
+│   │  "likely_buyer"  │    │  "likely_buyer"  │                │
+│   └────────┬─────────┘    └────────┬─────────┘                │
+│            │                       │                          │
+│            └───────────┬───────────┘                          │
+│                        │                                      │
+│              ┌─────────▼──────────┐                           │
+│              │     A/B TEST       │                           │
+│              │  Winner: v2        │                           │
+│              │  (higher conf)     │                           │
+│              └────────────────────┘                           │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## Quick Start
+### Key Numbers
+
+| Metric | Value |
+|--------|-------|
+| Events ingested | 55 (test run) |
+| Features per entity | 15 |
+| Prediction latency | 0.14ms |
+| Active models | 2 (v1, v2) |
+| A/B test winner | v2 (higher confidence) |
+
+### Quick Demo
+
 ```bash
-pip install -r requirements.txt
-python3 main.py    # Port 8004
+python3 main.py   # Port 8004
 
-# Full pipeline test
-curl -X POST "http://localhost:8004/api/v1/events/generate?entity_id=user_001&count=30"
-curl http://localhost:8004/api/v1/features/user_001
-curl -X POST "http://localhost:8004/api/v1/predict/user_001"
-curl -X POST "http://localhost:8004/api/v1/ab-test/user_001"
+# Full pipeline in 4 calls:
+curl -X POST "localhost:8004/api/v1/events/generate?entity_id=user_001&count=30"
+curl localhost:8004/api/v1/features/user_001
+curl -X POST "localhost:8004/api/v1/predict/user_001"
+curl -X POST "localhost:8004/api/v1/ab-test/user_001"
 ```
+
+### Live: http://135.181.93.114:8004
+
+---
+
+**Detailed Docs**: [ARCHITECTURE.md](ARCHITECTURE.md) | [IMPLEMENTATION.md](IMPLEMENTATION.md)

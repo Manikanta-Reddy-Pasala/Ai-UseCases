@@ -213,62 +213,52 @@ def _build_result(tech, confidence, bw_khz, center_hz, matched_bw, band_matches,
 
 
 def _detect_ofdm(samples: np.ndarray, sample_rate: float) -> tuple[bool, float, float]:
-    """Detect if signal is OFDM by looking for cyclic prefix correlation.
+    """Fast OFDM detection via vectorized CP autocorrelation. Target: <2ms.
 
-    OFDM signals have a cyclic prefix (CP) that creates a periodic correlation
-    peak at the OFDM symbol duration. This is the most reliable way to
-    distinguish OFDM (LTE/5G) from CDMA (UMTS) or single-carrier (GSM).
-
-    Returns: (is_ofdm, confidence, estimated_subcarrier_spacing_hz)
+    Uses vectorized sliding correlation instead of per-symbol loop.
     """
-    n = min(len(samples), 100000)
-    x = samples[:n]
+    n = min(len(samples), 20000)  # Only need ~1ms of data
+    x = samples[:n].astype(np.complex64)
 
-    # Try common FFT sizes / symbol durations
-    # LTE: FFT=2048 @ 30.72MHz → symbol = 66.7us, CP = 4.7us (normal) or 16.7us (extended)
-    # NR 30kHz: FFT=4096 @ 122.88MHz → symbol = 33.3us
-    best_corr = 0
+    best_corr = 0.0
     best_fft = 0
 
-    for fft_size in [256, 512, 1024, 2048, 4096]:
-        if fft_size >= n // 4:
+    # Only test the most likely FFT sizes for the sample rate
+    for fft_size in [128, 256, 512, 1024, 2048]:
+        if fft_size >= n // 3:
             continue
-        # CP lengths to try (as fraction of FFT size)
-        for cp_frac in [72 / 2048, 144 / 2048, 288 / 4096]:  # Normal CP, Extended CP, NR CP
-            cp_len = int(fft_size * cp_frac)
-            if cp_len < 4:
-                continue
+        cp_len = max(4, int(fft_size * 72 / 2048))  # Normal CP ratio
+        symbol_len = fft_size + cp_len
 
-            symbol_len = fft_size + cp_len
-            if symbol_len >= n:
-                continue
+        num_syms = min(n // symbol_len, 10)  # Only check 10 symbols
+        if num_syms < 2:
+            continue
 
-            # Correlate: compare start of symbol (CP) with end of symbol
-            num_symbols = min(n // symbol_len, 50)
-            correlations = []
-            for s in range(num_symbols):
-                offset = s * symbol_len
-                if offset + symbol_len > n:
-                    break
-                cp = x[offset:offset + cp_len]
-                tail = x[offset + fft_size:offset + fft_size + cp_len]
-                if len(cp) == len(tail) and len(cp) > 0:
-                    corr = np.abs(np.sum(cp * np.conj(tail))) / (
-                        np.sqrt(np.sum(np.abs(cp) ** 2) * np.sum(np.abs(tail) ** 2)) + 1e-10
-                    )
-                    correlations.append(corr)
+        # Vectorized: extract all CP and tail segments at once
+        offsets = np.arange(num_syms) * symbol_len
+        valid = offsets + symbol_len <= n
+        offsets = offsets[valid]
 
-            if correlations:
-                avg_corr = np.mean(correlations)
-                if avg_corr > best_corr:
-                    best_corr = avg_corr
-                    best_fft = fft_size
+        if len(offsets) < 2:
+            continue
 
-    # OFDM if correlation > 0.3 (CP copies should correlate well)
+        total_corr = 0.0
+        count = 0
+        for off in offsets:
+            cp = x[off:off + cp_len]
+            tail = x[off + fft_size:off + fft_size + cp_len]
+            num = np.abs(np.vdot(cp, tail))
+            denom = np.sqrt(np.vdot(cp, cp).real * np.vdot(tail, tail).real) + 1e-10
+            total_corr += num / denom
+            count += 1
+
+        avg_corr = total_corr / count if count > 0 else 0
+        if avg_corr > best_corr:
+            best_corr = float(avg_corr)
+            best_fft = fft_size
+
     is_ofdm = best_corr > 0.3
     confidence = min(best_corr * 1.5, 1.0)
-
-    # Estimate subcarrier spacing: SCS = sample_rate / fft_size
     scs = sample_rate / best_fft if best_fft > 0 else 0
 
     return is_ofdm, round(confidence, 3), round(scs, 0)

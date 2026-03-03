@@ -45,6 +45,7 @@ def _sanitize(obj):
 
 from signal_processing.iq_reader import read_iq_data, generate_test_signal
 from signal_processing.spectral_analyzer import analyze_spectrum
+from signal_processing.spectrogram_analyzer import analyze_spectrogram
 from detector.technology_classifier import classify_signal
 from bands.spectrum_db import (
     get_all_bands, get_bands_by_generation, identify_band_by_frequency, search_bands
@@ -189,6 +190,53 @@ async def analyze_generated_signal(
             "freq_mhz": (spectrum.freq_axis_hz[::step] / 1e6 + center_freq / 1e6).tolist(),
             "power_db": spectrum.psd_db[::step].tolist(),
         },
+        "analysis_duration_ms": int((time.time() - start) * 1000),
+    }))
+
+
+@app.post("/api/v1/analyze/spectrogram")
+async def analyze_spectrogram_data(
+    file: UploadFile = File(...),
+    center_freq_khz: float = Form(..., description="Center frequency in kHz"),
+    bandwidth_khz: float = Form(..., description="Total bandwidth in kHz"),
+    num_chunks: int = Form(1, description="Number of frequency chunks"),
+    overlap_khz: float = Form(10000),
+    threshold_db: float = Form(6),
+):
+    """Analyze pre-computed spectrogram data (same format as YOLO scanner input).
+
+    Input: float32 array of spectrogram values (dBm power), not raw IQ.
+    This is the same data format that the Ultralytics YOLO scanner processes.
+    """
+    start = time.time()
+    data = await file.read()
+    raw = np.frombuffer(data, dtype=np.float32)
+
+    result = analyze_spectrogram(
+        raw, center_freq_khz, bandwidth_khz,
+        num_chunks=num_chunks, overlap_khz=overlap_khz,
+        threshold_above_noise_db=threshold_db,
+    )
+
+    signals_out = []
+    for sig in result["signals"]:
+        signals_out.append({
+            "technology": sig.technology,
+            "generation": sig.band_info.get("generation", ""),
+            "center_freq_mhz": round(sig.absolute_center_freq_hz / 1e6, 1),
+            "center_freq_khz": round(sig.absolute_center_freq_hz / 1e3, 1),
+            "bandwidth_khz": round(sig.bandwidth_hz / 1000, 1),
+            "power_db": round(sig.power_db, 1),
+            "snr_db": sig.snr_db,
+            "spectral_flatness": sig.spectral_flatness,
+            "is_gap_detected": sig.is_2g_gap_detection,
+        })
+
+    return JSONResponse(_sanitize({
+        "signals": signals_out,
+        "noise_floor_db": result["noise_floor_db"],
+        "n_time_rows": result["n_time_rows"],
+        "n_freq_bins": result["n_freq_bins"],
         "analysis_duration_ms": int((time.time() - start) * 1000),
     }))
 
